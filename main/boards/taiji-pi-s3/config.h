@@ -6,7 +6,6 @@
 #include <driver/gpio.h>
 #include <driver/spi_master.h>
 
-#define AUDIO_INPUT_REFERENCE    true
 #define AUDIO_INPUT_SAMPLE_RATE  24000
 #define AUDIO_OUTPUT_SAMPLE_RATE 24000
 #define AUDIO_DEFAULT_OUTPUT_VOLUME 80
@@ -24,8 +23,8 @@
 
 #define DISPLAY_WIDTH       360
 #define DISPLAY_HEIGHT      360
-#define DISPLAY_MIRROR_X    false
-#define DISPLAY_MIRROR_Y    false
+#define DISPLAY_MIRROR_X    true
+#define DISPLAY_MIRROR_Y    true
 #define DISPLAY_SWAP_XY     false
 
 #define QSPI_LCD_H_RES           (360)

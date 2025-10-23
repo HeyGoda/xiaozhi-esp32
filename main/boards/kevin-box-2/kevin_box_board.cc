@@ -1,15 +1,15 @@
-#include "ml307_board.h"
-#include "audio_codecs/box_audio_codec.h"
+#include "dual_network_board.h"
+#include "codecs/box_audio_codec.h"
 #include "display/oled_display.h"
 #include "application.h"
 #include "button.h"
 #include "led/single_led.h"
-#include "iot/thing_manager.h"
 #include "config.h"
 #include "power_save_timer.h"
 #include "axp2101.h"
 #include "assets/lang_config.h"
 
+#include <wifi_station.h>
 #include <esp_log.h>
 #include <driver/gpio.h>
 #include <driver/i2c_master.h>
@@ -17,10 +17,6 @@
 #include <esp_lcd_panel_vendor.h>
 
 #define TAG "KevinBoxBoard"
-
-LV_FONT_DECLARE(font_puhui_14_1);
-LV_FONT_DECLARE(font_awesome_14_1);
-
 
 class Pmic : public Axp2101 {
 public:
@@ -50,14 +46,13 @@ public:
     }
 };
 
-    
-class KevinBoxBoard : public Ml307Board {
+class KevinBoxBoard : public DualNetworkBoard {
 private:
     i2c_master_bus_handle_t display_i2c_bus_;
     i2c_master_bus_handle_t codec_i2c_bus_;
     esp_lcd_panel_io_handle_t panel_io_ = nullptr;
     esp_lcd_panel_handle_t panel_ = nullptr;
-    OledDisplay* display_ = nullptr;
+    Display* display_ = nullptr;
     Pmic* pmic_ = nullptr;
     Button boot_button_;
     Button volume_up_button_;
@@ -137,6 +132,7 @@ private:
         ESP_ERROR_CHECK(esp_lcd_panel_reset(panel_));
         if (esp_lcd_panel_init(panel_) != ESP_OK) {
             ESP_LOGE(TAG, "Failed to initialize display");
+            display_ = new NoDisplay();
             return;
         }
 
@@ -144,8 +140,7 @@ private:
         ESP_LOGI(TAG, "Turning display on");
         ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel_, true));
 
-        display_ = new OledDisplay(panel_io_, panel_, DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y,
-            {&font_puhui_14_1, &font_awesome_14_1});
+        display_ = new OledDisplay(panel_io_, panel_, DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y);
     }
 
     void InitializeCodecI2c() {
@@ -168,10 +163,28 @@ private:
     void InitializeButtons() {
         boot_button_.OnPressDown([this]() {
             power_save_timer_->WakeUp();
-            Application::GetInstance().StartListening();
+            auto& app = Application::GetInstance();
+            app.StartListening();
         });
         boot_button_.OnPressUp([this]() {
-            Application::GetInstance().StopListening();
+            auto& app = Application::GetInstance();
+            app.StopListening();
+        });
+        boot_button_.OnClick([this]() {
+            auto& app = Application::GetInstance();
+            if (GetNetworkType() == NetworkType::WIFI) {
+                if (app.GetDeviceState() == kDeviceStateStarting && !WifiStation::GetInstance().IsConnected()) {
+                    // cast to WifiBoard
+                    auto& wifi_board = static_cast<WifiBoard&>(GetCurrentBoard());
+                    wifi_board.ResetWifiConfiguration();
+                }
+            }
+        });
+        boot_button_.OnDoubleClick([this]() {
+            auto& app = Application::GetInstance();
+            if (app.GetDeviceState() == kDeviceStateStarting || app.GetDeviceState() == kDeviceStateWifiConfiguring) {
+                SwitchNetworkType();
+            }
         });
 
         volume_up_button_.OnClick([this]() {
@@ -209,15 +222,8 @@ private:
         });
     }
 
-    // 物联网初始化，添加对 AI 可见设备
-    void InitializeIot() {
-        auto& thing_manager = iot::ThingManager::GetInstance();
-        thing_manager.AddThing(iot::CreateThing("Speaker"));
-        thing_manager.AddThing(iot::CreateThing("Battery"));
-    }
-
 public:
-    KevinBoxBoard() : Ml307Board(ML307_TX_PIN, ML307_RX_PIN, 4096),
+    KevinBoxBoard() : DualNetworkBoard(ML307_TX_PIN, ML307_RX_PIN),
         boot_button_(BOOT_BUTTON_GPIO),
         volume_up_button_(VOLUME_UP_BUTTON_GPIO),
         volume_down_button_(VOLUME_DOWN_BUTTON_GPIO) {
@@ -230,7 +236,6 @@ public:
 
         InitializeButtons();
         InitializePowerSaveTimer();
-        InitializeIot();
     }
 
     virtual Led* GetLed() override {
@@ -249,21 +254,16 @@ public:
         return display_;
     }
 
-    virtual bool GetBatteryLevel(int &level, bool& charging) override {
-        static bool last_charging = false;
+    virtual bool GetBatteryLevel(int &level, bool& charging, bool& discharging) override {
+        static bool last_discharging = false;
         charging = pmic_->IsCharging();
-        if (charging != last_charging) {
-            power_save_timer_->WakeUp();
-            last_charging = charging;
+        discharging = pmic_->IsDischarging();
+        if (discharging != last_discharging) {
+            power_save_timer_->SetEnabled(discharging);
+            last_discharging = discharging;
         }
 
         level = pmic_->GetBatteryLevel();
-
-        if (pmic_->IsDischarging()) {
-            power_save_timer_->SetEnabled(true);
-        } else {
-            power_save_timer_->SetEnabled(false);
-        }
         return true;
     }
 };

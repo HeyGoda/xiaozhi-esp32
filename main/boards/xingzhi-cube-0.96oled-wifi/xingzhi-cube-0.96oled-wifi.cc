@@ -1,11 +1,10 @@
 #include "wifi_board.h"
-#include "audio_codecs/no_audio_codec.h"
+#include "codecs/no_audio_codec.h"
 #include "display/oled_display.h"
 #include "system_reset.h"
 #include "application.h"
 #include "button.h"
 #include "config.h"
-#include "iot/thing_manager.h"
 #include "led/single_led.h"
 #include "assets/lang_config.h"
 #include "power_save_timer.h"
@@ -22,17 +21,13 @@
 
 #define TAG "XINGZHI_CUBE_0_96OLED_WIFI"
 
-LV_FONT_DECLARE(font_puhui_14_1);
-LV_FONT_DECLARE(font_awesome_14_1);
-
-
 class XINGZHI_CUBE_0_96OLED_WIFI : public WifiBoard {
 private:
     i2c_master_bus_handle_t display_i2c_bus_;
     Button boot_button_;
     Button volume_up_button_;
     Button volume_down_button_;
-    OledDisplay* display_;
+    Display* display_;
     PowerSaveTimer* power_save_timer_;
     PowerManager* power_manager_;
     esp_lcd_panel_io_handle_t panel_io_ = nullptr;
@@ -56,15 +51,10 @@ private:
 
         power_save_timer_ = new PowerSaveTimer(-1, 60, 300);
         power_save_timer_->OnEnterSleepMode([this]() {
-            ESP_LOGI(TAG, "Enabling sleep mode");
-            auto display = GetDisplay();
-            display->SetChatMessage("system", "");
-            display->SetEmotion("sleepy");
+            GetDisplay()->SetPowerSaveMode(true);
         });
         power_save_timer_->OnExitSleepMode([this]() {
-            auto display = GetDisplay();
-            display->SetChatMessage("system", "");
-            display->SetEmotion("neutral");
+            GetDisplay()->SetPowerSaveMode(false);
         });
         power_save_timer_->OnShutdownRequest([this]() {
             ESP_LOGI(TAG, "Shutting down");
@@ -129,6 +119,7 @@ private:
         ESP_ERROR_CHECK(esp_lcd_panel_reset(panel_));
         if (esp_lcd_panel_init(panel_) != ESP_OK) {
             ESP_LOGE(TAG, "Failed to initialize display");
+            display_ = new NoDisplay();
             return;
         }
 
@@ -136,8 +127,7 @@ private:
         ESP_LOGI(TAG, "Turning display on");
         ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel_, true));
 
-        display_ = new OledDisplay(panel_io_, panel_, DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y,
-            {&font_puhui_14_1, &font_awesome_14_1});
+        display_ = new OledDisplay(panel_io_, panel_, DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y);
     }
 
     void InitializeButtons() {
@@ -185,12 +175,6 @@ private:
         });
     }
 
-    void InitializeIot() {
-        auto& thing_manager = iot::ThingManager::GetInstance();
-        thing_manager.AddThing(iot::CreateThing("Speaker"));
-        thing_manager.AddThing(iot::CreateThing("Battery"));
-    }
-
 public:
     XINGZHI_CUBE_0_96OLED_WIFI() :
         boot_button_(BOOT_BUTTON_GPIO),
@@ -201,7 +185,6 @@ public:
         InitializeDisplayI2c();
         InitializeSsd1306Display();
         InitializeButtons();
-        InitializeIot();
     }
 
     virtual Led* GetLed() override {
@@ -219,8 +202,14 @@ public:
         return display_;
     }
 
-    virtual bool GetBatteryLevel(int& level, bool& charging) override {
+    virtual bool GetBatteryLevel(int& level, bool& charging, bool& discharging) override {
+        static bool last_discharging = false;
         charging = power_manager_->IsCharging();
+        discharging = power_manager_->IsDischarging();
+        if (discharging != last_discharging) {
+            power_save_timer_->SetEnabled(discharging);
+            last_discharging = discharging;
+        }
         level = power_manager_->GetBatteryLevel();
         return true;
     }

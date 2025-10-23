@@ -1,29 +1,25 @@
-#include "ml307_board.h"
-#include "audio_codecs/no_audio_codec.h"
+#include "dual_network_board.h"
+#include "codecs/no_audio_codec.h"
 #include "display/lcd_display.h"
 #include "system_reset.h"
 #include "application.h"
 #include "button.h"
 #include "config.h"
 #include "power_save_timer.h"
-#include "iot/thing_manager.h"
 #include "led/single_led.h"
 #include "assets/lang_config.h"
 #include "../xingzhi-cube-1.54tft-wifi/power_manager.h"
 
 #include <esp_log.h>
 #include <esp_lcd_panel_vendor.h>
+#include <wifi_station.h>
 
 #include <driver/rtc_io.h>
 #include <esp_sleep.h>
 
 #define TAG "XINGZHI_CUBE_1_54TFT_ML307"
 
-LV_FONT_DECLARE(font_puhui_20_4);
-LV_FONT_DECLARE(font_awesome_20_4);
-
-
-class XINGZHI_CUBE_1_54TFT_ML307 : public Ml307Board {
+class XINGZHI_CUBE_1_54TFT_ML307 : public DualNetworkBoard {
 private:
     Button boot_button_;
     Button volume_up_button_;
@@ -52,14 +48,11 @@ private:
 
         power_save_timer_ = new PowerSaveTimer(-1, 60, 300);
         power_save_timer_->OnEnterSleepMode([this]() {
-            ESP_LOGI(TAG, "Enabling sleep mode");
-            display_->SetChatMessage("system", "");
-            display_->SetEmotion("sleepy");
+            GetDisplay()->SetPowerSaveMode(true);
             GetBacklight()->SetBrightness(1);
         });
         power_save_timer_->OnExitSleepMode([this]() {
-            display_->SetChatMessage("system", "");
-            display_->SetEmotion("neutral");
+            GetDisplay()->SetPowerSaveMode(false);
             GetBacklight()->RestoreBrightness();
         });
         power_save_timer_->OnShutdownRequest([this]() {
@@ -88,7 +81,20 @@ private:
         boot_button_.OnClick([this]() {
             power_save_timer_->WakeUp();
             auto& app = Application::GetInstance();
+            if (GetNetworkType() == NetworkType::WIFI) {
+                if (app.GetDeviceState() == kDeviceStateStarting && !WifiStation::GetInstance().IsConnected()) {
+                    // cast to WifiBoard
+                    auto& wifi_board = static_cast<WifiBoard&>(GetCurrentBoard());
+                    wifi_board.ResetWifiConfiguration();
+                }
+            }
             app.ToggleChatState();
+        });
+        boot_button_.OnDoubleClick([this]() {
+            auto& app = Application::GetInstance();
+            if (app.GetDeviceState() == kDeviceStateStarting || app.GetDeviceState() == kDeviceStateWifiConfiguring) {
+                SwitchNetworkType();
+            }
         });
 
         volume_up_button_.OnClick([this]() {
@@ -151,24 +157,12 @@ private:
         ESP_ERROR_CHECK(esp_lcd_panel_invert_color(panel_, true));
 
         display_ = new SpiLcdDisplay(panel_io_, panel_, DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_OFFSET_X, DISPLAY_OFFSET_Y, 
-            DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y, DISPLAY_SWAP_XY, 
-        {
-            .text_font = &font_puhui_20_4,
-            .icon_font = &font_awesome_20_4,
-            .emoji_font = font_emoji_64_init(),
-        });
-    }
-
-    void InitializeIot() {
-        auto& thing_manager = iot::ThingManager::GetInstance();
-        thing_manager.AddThing(iot::CreateThing("Speaker"));
-        thing_manager.AddThing(iot::CreateThing("Backlight"));
-        thing_manager.AddThing(iot::CreateThing("Battery"));
+            DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y, DISPLAY_SWAP_XY);
     }
 
 public:
     XINGZHI_CUBE_1_54TFT_ML307() :
-        Ml307Board(ML307_TX_PIN, ML307_RX_PIN, 4096),
+        DualNetworkBoard(ML307_TX_PIN, ML307_RX_PIN),
         boot_button_(BOOT_BUTTON_GPIO),
         volume_up_button_(VOLUME_UP_BUTTON_GPIO),
         volume_down_button_(VOLUME_DOWN_BUTTON_GPIO) {
@@ -176,8 +170,7 @@ public:
         InitializePowerSaveTimer();
         InitializeSpi();
         InitializeButtons();
-        InitializeSt7789Display();  
-        InitializeIot();
+        InitializeSt7789Display();
         GetBacklight()->RestoreBrightness();
     }
 
@@ -196,8 +189,14 @@ public:
         return &backlight;
     }
 
-    virtual bool GetBatteryLevel(int& level, bool& charging) override {
+    virtual bool GetBatteryLevel(int& level, bool& charging, bool& discharging) override {
+        static bool last_discharging = false;
         charging = power_manager_->IsCharging();
+        discharging = power_manager_->IsDischarging();
+        if (discharging != last_discharging) {
+            power_save_timer_->SetEnabled(discharging);
+            last_discharging = discharging;
+        }
         level = power_manager_->GetBatteryLevel();
         return true;
     }
@@ -206,7 +205,7 @@ public:
         if (!enabled) {
             power_save_timer_->WakeUp();
         }
-        Ml307Board::SetPowerSaveMode(enabled);
+        DualNetworkBoard::SetPowerSaveMode(enabled);
     }
 };
 
